@@ -1,0 +1,91 @@
+func parseLmstatLicenseInfoFeature(outStr [][]string, logger *slog.Logger) (map[string]*feature,
+        map[string]map[string][]*featureUserUsed, map[string]map[string]float64, map[string]map[string]float64, 
+        map[string]map[string]float64) {  // New return map for FQDN-based aggregation
+        features := make(map[string]*feature)
+        licUsersByFeature := make(map[string]map[string][]*featureUserUsed)
+        reservGroupByFeature := make(map[string]map[string]float64)
+        reservHostByFeature := make(map[string]map[string]float64)
+        fqdnUsageByFeature := make(map[string]map[string]float64) // New map for FQDN segment aggregation
+        var featureName string
+
+        for _, line := range outStr {
+                lineJoined := strings.Join(line, "")
+                if lmutilLicenseFeatureUsageRegex.MatchString(lineJoined) {
+                        matches := lmutilLicenseFeatureUsageRegex.FindStringSubmatch(lineJoined)
+
+                        issued, err := strconv.Atoi(matches[2])
+                        if err != nil {
+                                logger.Error("err", "could not convert", matches[2], "to integer:", err)
+                        }
+
+                        featureName = matches[1]
+
+                        used, err := strconv.Atoi(matches[3])
+                        if err != nil {
+                                logger.Error("err", "could not convert", matches[3], "to integer:", err)
+                        }
+
+                        features[featureName] = &feature{
+                                issued: float64(issued),
+                                used:   float64(used),
+                        }
+                } else if lmutilLicenseFeatureUsageUserRegex.MatchString(lineJoined) {
+                        if licUsersByFeature[featureName] == nil {
+                                licUsersByFeature[featureName] = map[string][]*featureUserUsed{}
+                        }
+                        if fqdnUsageByFeature[featureName] == nil {
+                                fqdnUsageByFeature[featureName] = map[string]float64{}
+                        }
+
+                        matches := reSubMatchMap(lmutilLicenseFeatureUsageUserRegex, lineJoined)
+                        username := matches["user"]
+                        fqdn := matches["host"] // Assume "host" is extracted from regex
+
+                        if strings.TrimSpace(username) == "" {
+                                logger.Debug("username couldn't be found for '", lineJoined,
+                                        "', using lmutilLicenseFeatureUsageUser2Regex.")
+
+                                matches = reSubMatchMap(lmutilLicenseFeatureUsageUser2Regex, lineJoined)
+                                username = matches["user"]
+                        }
+
+                        fqdnSegment := extractFQDNSegment(fqdn) // Extract relevant part of FQDN
+
+                        if matches["licenses"] != "" {
+                                licUsed, err := strconv.Atoi(matches["licenses"])
+                                if err != nil {
+                                        logger.Error("err", "could not convert", matches["licenses"], "to integer:", err)
+                                }
+
+                                for i := range licUsersByFeature[featureName][username] {
+                                        if licUsersByFeature[featureName][username][i].version == matches["ver"] {
+                                                licUsersByFeature[featureName][username][i].num += float64(licUsed)
+                                        }
+                                }
+
+                                // Aggregate by FQDN segment
+                                fqdnUsageByFeature[featureName][fqdnSegment] += float64(licUsed)
+
+                        } else {
+                                for i := range licUsersByFeature[featureName][username] {
+                                        if licUsersByFeature[featureName][username][i].version == matches["ver"] {
+                                                licUsersByFeature[featureName][username][i].num += 1.0
+                                        }
+                                }
+
+                                // Increment by default 1 license usage for FQDN aggregation
+                                fqdnUsageByFeature[featureName][fqdnSegment] += 1.0
+                        }
+                }
+        }
+
+        return features, licUsersByFeature, reservGroupByFeature, reservHostByFeature, fqdnUsageByFeature
+}
+
+func extractFQDNSegment(fqdn string) string {
+        parts := strings.Split(fqdn, ".")
+        if len(parts) < 2 {
+                return fqdn // Return as-is if there's no subdomain
+        }
+        return parts[len(parts)-2] // Extract second-level domain (e.g., "company" from "user1.office.company.com")
+}
